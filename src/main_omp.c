@@ -33,8 +33,17 @@
  * ===================================================================== */
 static void grayscale_omp(const image_t *img, unsigned char *gray)
 {
-    /* TODO 1: parallelise this loop. */
-    grayscale_serial(img, gray);
+    const int n = img->width * img->height;
+
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        const unsigned char r = img->pixels[i * 3 + 0];
+        const unsigned char g = img->pixels[i * 3 + 1];
+        const unsigned char b = img->pixels[i * 3 + 2];
+
+        /* Rec. 601 luminance */
+        gray[i] = (unsigned char)(0.299 * r + 0.587 * g + 0.114 * b);
+    }
 }
 
 /* =====================================================================
@@ -49,11 +58,36 @@ static void grayscale_omp(const image_t *img, unsigned char *gray)
  *
  * Hint: the two nested loops can be merged with collapse(2).
  * ===================================================================== */
+static const int GAUSS5[5][5] = {
+    {  1,  4,  6,  4,  1 },
+    {  4, 16, 24, 16,  4 },
+    {  6, 24, 36, 24,  6 },
+    {  4, 16, 24, 16,  4 },
+    {  1,  4,  6,  4,  1 },
+};
+
 static void blur_omp(const unsigned char *gray, unsigned char *out,
                      int width, int height)
 {
-    /* TODO 2: parallelise the blur. */
-    blur_serial(gray, out, width, height);
+    #pragma omp parallel for collapse(2)
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const int i = y * width + x;
+
+            /* Near the border there is no full window: copy the pixel. */
+            if (y < 2 || y >= height - 2 || x < 2 || x >= width - 2) {
+                out[i] = gray[i];
+                continue;
+            }
+
+            int acc = 0;
+            for (int ky = -2; ky <= 2; ++ky)
+                for (int kx = -2; kx <= 2; ++kx)
+                    acc += GAUSS5[ky + 2][kx + 2] * gray[(y + ky) * width + (x + kx)];
+
+            out[i] = (unsigned char)(acc / 256);
+        }
+    }
 }
 
 /* =====================================================================
@@ -61,11 +95,40 @@ static void blur_omp(const unsigned char *gray, unsigned char *out,
  *
  * Same shape as the blur: reads a neighbourhood, writes one pixel.
  * ===================================================================== */
-static void sobel_omp(const unsigned char *blurred, unsigned char *edges,
+static void sobel_omp(const unsigned char *gray, unsigned char *edges,
                       int width, int height)
 {
-    /* TODO 3: parallelise the Sobel operator. */
-    sobel_serial(blurred, edges, width, height);
+    /* Clear the border: the 3x3 window does not fit there. */
+    #pragma omp parallel for
+    for (int x = 0; x < width; ++x) {
+        edges[x] = 0;
+        edges[(height - 1) * width + x] = 0;
+    }
+    #pragma omp parallel for
+    for (int y = 0; y < height; ++y) {
+        edges[y * width] = 0;
+        edges[y * width + width - 1] = 0;
+    }
+
+    #pragma omp parallel for collapse(2)
+    for (int y = 1; y < height - 1; ++y) {
+        for (int x = 1; x < width - 1; ++x) {
+            const int i = y * width + x;
+
+            const int tl = gray[i - width - 1], tc = gray[i - width], tr = gray[i - width + 1];
+            const int ml = gray[i - 1],                               mr = gray[i + 1];
+            const int bl = gray[i + width - 1], bc = gray[i + width], br = gray[i + width + 1];
+
+            const int gx = (tr + 2 * mr + br) - (tl + 2 * ml + bl);
+            const int gy = (bl + 2 * bc + br) - (tl + 2 * tc + tr);
+
+            int mag = abs(gx) + abs(gy);
+            if (mag > 255)
+                mag = 255;
+
+            edges[i] = (unsigned char)mag;
+        }
+    }
 }
 
 /* =====================================================================
@@ -93,7 +156,7 @@ static void histogram_naive(const unsigned char *edges, int n, long *hist)
 {
     memset(hist, 0, sizeof(long) * HIST_BINS);
 
-    /* TODO 4a: add #pragma omp parallel for and nothing else. */
+    #pragma omp parallel for
     for (int i = 0; i < n; ++i)
         hist[edges[i]]++;
 }
@@ -103,9 +166,11 @@ static void histogram_critical(const unsigned char *edges, int n, long *hist)
 {
     memset(hist, 0, sizeof(long) * HIST_BINS);
 
-    /* TODO 4b */
-    for (int i = 0; i < n; ++i)
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        #pragma omp critical
         hist[edges[i]]++;
+    }
 }
 
 /* C. atomic */
@@ -113,9 +178,11 @@ static void histogram_atomic(const unsigned char *edges, int n, long *hist)
 {
     memset(hist, 0, sizeof(long) * HIST_BINS);
 
-    /* TODO 4c */
-    for (int i = 0; i < n; ++i)
+    #pragma omp parallel for
+    for (int i = 0; i < n; ++i) {
+        #pragma omp atomic
         hist[edges[i]]++;
+    }
 }
 
 /* D. array reduction */
@@ -123,7 +190,7 @@ static void histogram_reduction(const unsigned char *edges, int n, long *hist)
 {
     memset(hist, 0, sizeof(long) * HIST_BINS);
 
-    /* TODO 4d */
+    #pragma omp parallel for reduction(+ : hist[:HIST_BINS])
     for (int i = 0; i < n; ++i)
         hist[edges[i]]++;
 }
